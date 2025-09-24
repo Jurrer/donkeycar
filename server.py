@@ -39,7 +39,7 @@ class RemoteControlServer:
         self.model.load(self.model_path)
         logging.info("Model loaded successfully.")
 
-    async def handle_connection(self, websocket, path):
+    async def handle_connection(self, websocket):
         """Handle a new WebSocket connection from a car."""
         logging.info(f"Car connected from {websocket.remote_address}")
         try:
