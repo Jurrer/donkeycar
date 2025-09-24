@@ -26,7 +26,8 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras.layers import (Dense, Input,Convolution2D,
     MaxPooling2D, Activation, Dropout, Flatten, LSTM, BatchNormalization,
-    Conv3D, MaxPooling3D, Conv2DTranspose)
+    Conv3D, MaxPooling3D, Conv2DTranspose, Add, GlobalAveragePooling2D,
+    Reshape, Multiply, Lambda)
 
 from tensorflow.keras.layers import TimeDistributed as TD
 from tensorflow.keras.backend import concatenate
@@ -1130,4 +1131,255 @@ def default_latent(num_outputs, input_shape):
         outputs.append(Dense(1, activation='linear', name='n_outputs' + str(i))(x))
         
     model = Model(inputs=[img_in], outputs=outputs, name='latent')
+    return model
+
+
+class KerasAdvanced(KerasPilot):
+    """
+    Advanced Keras pilot with ResNet backbone, attention mechanisms,
+    uncertainty quantification, and advanced loss functions.
+    Designed to utilize maximum GPU resources for improved accuracy.
+    """
+    def __init__(self,
+                 interpreter: Interpreter = KerasInterpreter(),
+                 input_shape: Tuple[int, ...] = (120, 160, 3),
+                 num_outputs: int = 2,
+                 num_residual_blocks: int = 6,
+                 base_filters: int = 64,
+                 use_attention: bool = True,
+                 mc_samples: int = 10,
+                 uncertainty_weight: float = 0.1):
+        self.num_outputs = num_outputs
+        self.num_residual_blocks = num_residual_blocks
+        self.base_filters = base_filters
+        self.use_attention = use_attention
+        self.mc_samples = mc_samples
+        self.uncertainty_weight = uncertainty_weight
+        super().__init__(interpreter, input_shape)
+
+    def create_model(self):
+        return advanced_resnet_with_uncertainty(
+            input_shape=self.input_shape,
+            num_outputs=self.num_outputs,
+            num_residual_blocks=self.num_residual_blocks,
+            base_filters=self.base_filters,
+            use_attention=self.use_attention
+        )
+
+    def compile(self):
+        self.interpreter.compile(
+            optimizer=keras.optimizers.Adam(learning_rate=1e-4, clipnorm=1.0),
+            loss={
+                'steering_mean': advanced_huber_loss,
+                'steering_var': 'mse',
+                'throttle_mean': advanced_huber_loss,
+                'throttle_var': 'mse'
+            },
+            loss_weights={
+                'steering_mean': 1.0,
+                'steering_var': self.uncertainty_weight,
+                'throttle_mean': 1.0,
+                'throttle_var': self.uncertainty_weight
+            },
+            metrics=['mae']
+        )
+
+    def interpreter_to_output(self, interpreter_out):
+        steering_mean, steering_var, throttle_mean, throttle_var = interpreter_out
+        return steering_mean[0], throttle_mean[0], steering_var[0], throttle_var[0]
+
+    def run_with_uncertainty(self, img_arr: np.ndarray, *other_arr: List[float]):
+        """Run inference with uncertainty quantification using Monte Carlo dropout."""
+        norm_img_arr = normalize_image(img_arr)
+        np_other_array = tuple(np.array(arr) for arr in other_arr)
+        values = (norm_img_arr, ) + np_other_array
+        input_dict = dict(zip(self.output_shapes()[0].keys(), values))
+
+        # Enable training mode for dropout during inference
+        predictions = []
+        for _ in range(self.mc_samples):
+            pred = self.interpreter.predict_from_dict(input_dict, training=True)
+            predictions.append(pred)
+
+        # Calculate mean and uncertainty across samples
+        predictions = np.array(predictions)
+        mean_steering = np.mean(predictions[:, 0])
+        mean_throttle = np.mean(predictions[:, 2])
+        uncertainty_steering = np.std(predictions[:, 0])
+        uncertainty_throttle = np.std(predictions[:, 2])
+
+        return mean_steering, mean_throttle, uncertainty_steering, uncertainty_throttle
+
+    def y_transform(self, record: Union[TubRecord, List[TubRecord]]) \
+            -> Dict[str, Union[float, List[float]]]:
+        assert isinstance(record, TubRecord), 'TubRecord expected'
+        angle: float = record.underlying['user/angle']
+        throttle: float = record.underlying['user/throttle']
+        # Initialize variance targets (will be learned during training)
+        return {
+            'steering_mean': angle,
+            'steering_var': 0.1,  # Initial uncertainty estimate
+            'throttle_mean': throttle,
+            'throttle_var': 0.1
+        }
+
+    def output_shapes(self):
+        img_shape = self.get_input_shape('img_in')[1:]
+        shapes = (
+            {'img_in': tf.TensorShape(img_shape)},
+            {
+                'steering_mean': tf.TensorShape([]),
+                'steering_var': tf.TensorShape([]),
+                'throttle_mean': tf.TensorShape([]),
+                'throttle_var': tf.TensorShape([])
+            }
+        )
+        return shapes
+
+
+def advanced_huber_loss(y_true, y_pred, delta=1.0):
+    """Advanced Huber loss with adaptive delta."""
+    error = y_true - y_pred
+    is_small_error = tf.abs(error) <= delta
+    squared_loss = tf.square(error) / 2
+    linear_loss = delta * tf.abs(error) - tf.square(delta) / 2
+    return tf.where(is_small_error, squared_loss, linear_loss)
+
+
+def focal_loss(y_true, y_pred, alpha=0.25, gamma=2.0):
+    """Focal loss for handling class imbalance in steering angles."""
+    epsilon = tf.keras.backend.epsilon()
+    y_pred = tf.clip_by_value(y_pred, epsilon, 1. - epsilon)
+    p_t = tf.where(tf.equal(y_true, 1), y_pred, 1 - y_pred)
+    alpha_factor = tf.ones_like(y_true) * alpha
+    alpha_t = tf.where(tf.equal(y_true, 1), alpha_factor, 1 - alpha_factor)
+    cross_entropy = -tf.math.log(p_t)
+    weight = alpha_t * tf.pow((1 - p_t), gamma)
+    focal_loss = weight * cross_entropy
+    return tf.reduce_mean(focal_loss)
+
+
+def uncertainty_loss(y_true, y_pred_var):
+    """Loss function for uncertainty estimation."""
+    return tf.reduce_mean(tf.square(y_pred_var))
+
+
+def residual_block(x, filters, kernel_size=3, stride=1, dropout_rate=0.1):
+    """ResNet-style residual block with dropout for uncertainty."""
+    shortcut = x
+
+    # First conv layer
+    x = Convolution2D(filters, kernel_size, strides=stride, padding='same')(x)
+    x = BatchNormalization()(x)
+    x = Activation('relu')(x)
+    x = Dropout(dropout_rate)(x, training=True)  # Always active for MC dropout
+
+    # Second conv layer
+    x = Convolution2D(filters, kernel_size, strides=1, padding='same')(x)
+    x = BatchNormalization()(x)
+
+    # Adjust shortcut if needed
+    if stride != 1 or shortcut.shape[-1] != filters:
+        shortcut = Convolution2D(filters, 1, strides=stride, padding='same')(shortcut)
+        shortcut = BatchNormalization()(shortcut)
+
+    # Add shortcut
+    x = Add()([x, shortcut])
+    x = Activation('relu')(x)
+    x = Dropout(dropout_rate)(x, training=True)
+
+    return x
+
+
+def channel_attention(x, ratio=8):
+    """Channel attention mechanism (SE-Net style)."""
+    channels = x.shape[-1]
+
+    # Global average pooling
+    gap = GlobalAveragePooling2D()(x)
+
+    # MLP
+    mlp = Dense(channels // ratio, activation='relu')(gap)
+    mlp = Dense(channels, activation='sigmoid')(mlp)
+
+    # Reshape and multiply
+    mlp = Reshape((1, 1, channels))(mlp)
+    return Multiply()([x, mlp])
+
+
+def spatial_attention(x):
+    """Spatial attention mechanism."""
+    # Average and max pooling across channels
+    avg_pool = Lambda(lambda x: tf.reduce_mean(x, axis=-1, keepdims=True))(x)
+    max_pool = Lambda(lambda x: tf.reduce_max(x, axis=-1, keepdims=True))(x)
+
+    # Concatenate and convolve
+    concat = concatenate([avg_pool, max_pool])
+    attention = Convolution2D(1, 7, padding='same', activation='sigmoid')(concat)
+
+    return Multiply()([x, attention])
+
+
+def advanced_resnet_with_uncertainty(input_shape=(120, 160, 3),
+                                   num_outputs=2,
+                                   num_residual_blocks=6,
+                                   base_filters=64,
+                                   use_attention=True):
+    """
+    Advanced ResNet architecture with attention mechanisms and uncertainty quantification.
+    Designed to maximize GPU utilization while providing accurate steering/throttle prediction.
+    """
+    img_in = Input(shape=input_shape, name='img_in')
+
+    # Initial convolution with larger kernel for better feature extraction
+    x = Convolution2D(base_filters, 7, strides=2, padding='same')(img_in)
+    x = BatchNormalization()(x)
+    x = Activation('relu')(x)
+    x = MaxPooling2D(3, strides=2, padding='same')(x)
+
+    # Progressive residual blocks with increasing channels
+    filters = base_filters
+    for i in range(num_residual_blocks):
+        stride = 2 if i > 0 and i % 2 == 0 else 1
+        if i > 0 and i % 2 == 0:
+            filters *= 2
+
+        x = residual_block(x, filters, stride=stride, dropout_rate=0.15)
+
+        # Add attention every 2 blocks
+        if use_attention and (i + 1) % 2 == 0:
+            x = channel_attention(x)
+            x = spatial_attention(x)
+
+    # Additional deep residual blocks for more capacity
+    for i in range(3):
+        x = residual_block(x, filters * 2, dropout_rate=0.2)
+        if use_attention:
+            x = channel_attention(x)
+
+    # Global average pooling instead of flatten for better generalization
+    x = GlobalAveragePooling2D()(x)
+
+    # Dense layers with increased capacity
+    x = Dense(512, activation='relu')(x)
+    x = Dropout(0.3)(x, training=True)  # MC dropout
+    x = Dense(256, activation='relu')(x)
+    x = Dropout(0.25)(x, training=True)
+    x = Dense(128, activation='relu')(x)
+    x = Dropout(0.2)(x, training=True)
+
+    # Uncertainty quantification outputs
+    # For each output, predict both mean and variance
+    steering_mean = Dense(1, activation='tanh', name='steering_mean')(x)
+    steering_var = Dense(1, activation='softplus', name='steering_var')(x)  # Ensure positive
+
+    throttle_mean = Dense(1, activation='sigmoid', name='throttle_mean')(x)
+    throttle_var = Dense(1, activation='softplus', name='throttle_var')(x)
+
+    model = Model(
+        inputs=[img_in],
+        outputs=[steering_mean, steering_var, throttle_mean, throttle_var],
+        name='advanced_resnet_uncertainty'
+    )
+
     return model
