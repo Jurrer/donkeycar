@@ -488,7 +488,7 @@ def get_model_by_type(model_type: str, cfg: 'Config') -> Union['KerasPilot', 'Fa
     '''
     from donkeycar.parts.keras import KerasCategorical, KerasLinear, \
         KerasInferred, KerasIMU, KerasMemory, KerasBehavioral, KerasLocalizer, \
-        KerasLSTM, Keras3D_CNN
+        KerasLSTM, Keras3D_CNN, KerasAdvanced
     from donkeycar.parts.interpreter import KerasInterpreter, TfLite, TensorRT, \
         FastAIInterpreter
 
@@ -544,6 +544,8 @@ def get_model_by_type(model_type: str, cfg: 'Config') -> Union['KerasPilot', 'Fa
     elif used_model_type == '3d':
         kl = Keras3D_CNN(interpreter=interpreter, input_shape=input_shape,
                          seq_length=cfg.SEQUENCE_LENGTH)
+    elif used_model_type == "advanced":
+        kl = KerasAdvanced(interpreter=interpreter, input_shape=input_shape)
     else:
         known = [k + u for k in ('', 'tflite_', 'tensorrt_')
                  for u in used_model_type.mem]
