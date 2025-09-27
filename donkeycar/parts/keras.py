@@ -1138,14 +1138,14 @@ class KerasAdvanced(KerasPilot):
     """
     Advanced Keras pilot with ResNet backbone, attention mechanisms,
     uncertainty quantification, and advanced loss functions.
-    Designed to utilize maximum GPU resources for improved accuracy.
+    Memory-optimized for GPU efficiency.
     """
     def __init__(self,
                  interpreter: Interpreter = KerasInterpreter(),
                  input_shape: Tuple[int, ...] = (120, 160, 3),
                  num_outputs: int = 2,
-                 num_residual_blocks: int = 6,
-                 base_filters: int = 64,
+                 num_residual_blocks: int = 4,  # Reduced for memory efficiency
+                 base_filters: int = 32,        # Reduced from 64
                  use_attention: bool = True,
                  mc_samples: int = 10,
                  uncertainty_weight: float = 0.1):
@@ -1322,51 +1322,50 @@ def spatial_attention(x):
 
 def advanced_resnet_with_uncertainty(input_shape=(120, 160, 3),
                                    num_outputs=2,
-                                   num_residual_blocks=6,
-                                   base_filters=64,
+                                   num_residual_blocks=4,
+                                   base_filters=32,
                                    use_attention=True):
     """
-    Advanced ResNet architecture with attention mechanisms and uncertainty quantification.
-    Designed to maximize GPU utilization while providing accurate steering/throttle prediction.
+    Memory-optimized ResNet architecture with attention mechanisms and uncertainty quantification.
+    Balanced between performance and GPU memory usage.
     """
     img_in = Input(shape=input_shape, name='img_in')
 
-    # Initial convolution with larger kernel for better feature extraction
-    x = Convolution2D(base_filters, 7, strides=2, padding='same')(img_in)
+    # Initial convolution - smaller kernel to save memory
+    x = Convolution2D(base_filters, 5, strides=2, padding='same')(img_in)
     x = BatchNormalization()(x)
     x = Activation('relu')(x)
     x = MaxPooling2D(3, strides=2, padding='same')(x)
 
-    # Progressive residual blocks with increasing channels
+    # Progressive residual blocks with controlled channel growth
     filters = base_filters
     for i in range(num_residual_blocks):
         stride = 2 if i > 0 and i % 2 == 0 else 1
         if i > 0 and i % 2 == 0:
-            filters *= 2
+            filters = min(filters * 2, 128)  # Cap at 128 to control memory
 
-        x = residual_block(x, filters, stride=stride, dropout_rate=0.15)
+        x = residual_block(x, filters, stride=stride, dropout_rate=0.1)
 
         # Add attention every 2 blocks
         if use_attention and (i + 1) % 2 == 0:
-            x = channel_attention(x)
+            x = channel_attention(x, ratio=16)  # Higher ratio to reduce params
             x = spatial_attention(x)
 
-    # Additional deep residual blocks for more capacity
-    for i in range(3):
-        x = residual_block(x, filters * 2, dropout_rate=0.2)
-        if use_attention:
-            x = channel_attention(x)
+    # One additional block for capacity without massive memory increase
+    x = residual_block(x, filters, dropout_rate=0.15)
+    if use_attention:
+        x = channel_attention(x, ratio=16)
 
     # Global average pooling instead of flatten for better generalization
     x = GlobalAveragePooling2D()(x)
 
-    # Dense layers with increased capacity
-    x = Dense(512, activation='relu')(x)
-    x = Dropout(0.3)(x, training=True)  # MC dropout
+    # Smaller dense layers to reduce memory usage
     x = Dense(256, activation='relu')(x)
-    x = Dropout(0.25)(x, training=True)
+    x = Dropout(0.25)(x, training=True)  # MC dropout
     x = Dense(128, activation='relu')(x)
     x = Dropout(0.2)(x, training=True)
+    x = Dense(64, activation='relu')(x)
+    x = Dropout(0.15)(x, training=True)
 
     # Uncertainty quantification outputs
     # For each output, predict both mean and variance
@@ -1380,6 +1379,133 @@ def advanced_resnet_with_uncertainty(input_shape=(120, 160, 3),
         inputs=[img_in],
         outputs=[steering_mean, steering_var, throttle_mean, throttle_var],
         name='advanced_resnet_uncertainty'
+    )
+
+    return model
+
+
+class KerasAdvancedLite(KerasPilot):
+    """
+    Lightweight version of KerasAdvanced for smaller GPUs.
+    Still includes modern techniques but with reduced memory footprint.
+    """
+    def __init__(self,
+                 interpreter: Interpreter = KerasInterpreter(),
+                 input_shape: Tuple[int, ...] = (120, 160, 3),
+                 num_outputs: int = 2,
+                 base_filters: int = 24,
+                 use_attention: bool = True,
+                 mc_samples: int = 5,
+                 uncertainty_weight: float = 0.1):
+        self.num_outputs = num_outputs
+        self.base_filters = base_filters
+        self.use_attention = use_attention
+        self.mc_samples = mc_samples
+        self.uncertainty_weight = uncertainty_weight
+        super().__init__(interpreter, input_shape)
+
+    def create_model(self):
+        return lightweight_resnet_with_uncertainty(
+            input_shape=self.input_shape,
+            base_filters=self.base_filters,
+            use_attention=self.use_attention
+        )
+
+    def compile(self):
+        self.interpreter.compile(
+            optimizer=keras.optimizers.Adam(learning_rate=1e-4, clipnorm=1.0),
+            loss={
+                'steering_mean': advanced_huber_loss,
+                'steering_var': 'mse',
+                'throttle_mean': advanced_huber_loss,
+                'throttle_var': 'mse'
+            },
+            loss_weights={
+                'steering_mean': 1.0,
+                'steering_var': self.uncertainty_weight,
+                'throttle_mean': 1.0,
+                'throttle_var': self.uncertainty_weight
+            },
+            metrics=['mae']
+        )
+
+    def interpreter_to_output(self, interpreter_out):
+        steering_mean, steering_var, throttle_mean, throttle_var = interpreter_out
+        return steering_mean[0], throttle_mean[0], steering_var[0], throttle_var[0]
+
+    def y_transform(self, record: Union[TubRecord, List[TubRecord]]) \
+            -> Dict[str, Union[float, List[float]]]:
+        assert isinstance(record, TubRecord), 'TubRecord expected'
+        angle: float = record.underlying['user/angle']
+        throttle: float = record.underlying['user/throttle']
+        return {
+            'steering_mean': angle,
+            'steering_var': 0.1,
+            'throttle_mean': throttle,
+            'throttle_var': 0.1
+        }
+
+    def output_shapes(self):
+        img_shape = self.get_input_shape('img_in')[1:]
+        shapes = (
+            {'img_in': tf.TensorShape(img_shape)},
+            {
+                'steering_mean': tf.TensorShape([]),
+                'steering_var': tf.TensorShape([]),
+                'throttle_mean': tf.TensorShape([]),
+                'throttle_var': tf.TensorShape([])
+            }
+        )
+        return shapes
+
+
+def lightweight_resnet_with_uncertainty(input_shape=(120, 160, 3),
+                                       base_filters=24,
+                                       use_attention=True):
+    """
+    Lightweight ResNet for GPUs with limited memory (4-6GB).
+    Maintains advanced features while being memory efficient.
+    """
+    img_in = Input(shape=input_shape, name='img_in')
+
+    # Initial convolution with aggressive downsampling
+    x = Convolution2D(base_filters, 5, strides=2, padding='same')(img_in)
+    x = BatchNormalization()(x)
+    x = Activation('relu')(x)
+    x = MaxPooling2D(2, strides=2, padding='same')(x)
+
+    # Lightweight residual blocks
+    x = residual_block(x, base_filters, stride=1, dropout_rate=0.1)
+    if use_attention:
+        x = channel_attention(x, ratio=8)
+
+    x = residual_block(x, base_filters * 2, stride=2, dropout_rate=0.1)
+    if use_attention:
+        x = spatial_attention(x)
+
+    x = residual_block(x, base_filters * 3, stride=2, dropout_rate=0.15)
+    if use_attention:
+        x = channel_attention(x, ratio=8)
+
+    # Global average pooling
+    x = GlobalAveragePooling2D()(x)
+
+    # Compact dense layers
+    x = Dense(128, activation='relu')(x)
+    x = Dropout(0.2)(x, training=True)
+    x = Dense(64, activation='relu')(x)
+    x = Dropout(0.15)(x, training=True)
+
+    # Uncertainty outputs
+    steering_mean = Dense(1, activation='tanh', name='steering_mean')(x)
+    steering_var = Dense(1, activation='softplus', name='steering_var')(x)
+    throttle_mean = Dense(1, activation='sigmoid', name='throttle_mean')(x)
+    throttle_var = Dense(1, activation='softplus', name='throttle_var')(x)
+
+    model = Model(
+        inputs=[img_in],
+        outputs=[steering_mean, steering_var, throttle_mean, throttle_var],
+        name='lightweight_resnet_uncertainty'
     )
 
     return model

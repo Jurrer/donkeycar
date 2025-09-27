@@ -21,7 +21,7 @@ def tmp_dir() -> str:
 
 test_data = [KerasLinear, KerasCategorical, KerasInferred, KerasLSTM,
              KerasLocalizer, KerasIMU, Keras3D_CNN, KerasMemory,
-             KerasBehavioral]
+             KerasBehavioral, KerasAdvanced, KerasAdvancedLite]
 
 
 def create_models(keras_pilot, dir):
