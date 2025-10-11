@@ -352,6 +352,45 @@ class KerasLinear(KerasPilot):
                    'n_outputs1': tf.TensorShape([])})
         return shapes
 
+class NvidiaDAVE02(KerasPilot):
+    """
+    The KerasLinear pilot uses one neuron to output a continuous value via
+    the Keras Dense layer with linear activation. One each for steering and
+    throttle. The output is not bounded.
+    """
+    def __init__(self,
+                 interpreter: Interpreter = KerasInterpreter(),
+                 input_shape: Tuple[int, ...] = (120, 160, 3),
+                 num_outputs: int = 2):
+        self.num_outputs = num_outputs
+        super().__init__(interpreter, input_shape)
+
+    def create_model(self):
+        return dave02(self.num_outputs, self.input_shape)
+
+    def compile(self):
+        self.interpreter.compile(optimizer=self.optimizer, loss='mse')
+
+    def interpreter_to_output(self, interpreter_out):
+        steering = interpreter_out[0]
+        throttle = interpreter_out[1]
+        return steering[0], throttle[0]
+
+    def y_transform(self, record: Union[TubRecord, List[TubRecord]]) \
+            -> Dict[str, Union[float, List[float]]]:
+        assert isinstance(record, TubRecord), 'TubRecord expected'
+        angle: float = record.underlying['user/angle']
+        throttle: float = record.underlying['user/throttle']
+        return {'n_outputs0': angle, 'n_outputs1': throttle}
+
+    def output_shapes(self):
+        # need to cut off None from [None, 120, 160, 3] tensor shape
+        img_shape = self.get_input_shape('img_in')[1:]
+        shapes = ({'img_in': tf.TensorShape(img_shape)},
+                  {'n_outputs0': tf.TensorShape([]),
+                   'n_outputs1': tf.TensorShape([])})
+        return shapes
+
 
 class KerasMemory(KerasLinear):
     """
@@ -840,6 +879,28 @@ def core_cnn_layers(img_in, drop, l4_stride=1):
     x = Flatten(name='flattened')(x)
     return x
 
+def dave02conv_layers(img_in, drop, l4_stride=1):
+    """
+    Returns the core CNN layers that were described in the NVIDIA paper
+
+    :param img_in:          input layer of network
+    :param drop:            dropout rate
+    :param l4_stride:       4-th layer stride, default 1
+    :return:                stack of CNN layers
+    """
+    x = img_in
+    x = conv2d(24, 5, 2, 1)(x)
+    x = Dropout(drop)(x)
+    x = conv2d(36, 5, 2, 2)(x)
+    x = Dropout(drop)(x)
+    x = conv2d(48, 5, 2, 3)(x)
+    x = Dropout(drop)(x)
+    x = conv2d(64, 3, l4_stride, 4)(x)
+    x = Dropout(drop)(x)
+    x = conv2d(64, 3, 1, 5)(x)
+    x = Dropout(drop)(x)
+    x = Flatten(name='flattened')(x)
+    return x
 
 def default_n_linear(num_outputs, input_shape=(120, 160, 3)):
     drop = 0.2
@@ -858,6 +919,26 @@ def default_n_linear(num_outputs, input_shape=(120, 160, 3)):
     model = Model(inputs=[img_in], outputs=outputs, name='linear')
     return model
 
+def dave02(num_outputs, input_shape=(120, 160, 3)):
+    drop = 0.2
+    img_in = Input(shape=input_shape, name='img_in')
+    x = dave02conv_layers(img_in, drop)
+    x = Dense(1164, activation='relu', name='dense_1')(x)
+    x = Dropout(drop)(x)
+    x = Dense(100, activation='relu', name='dense_2')(x)
+    x = Dropout(drop)(x)
+    x = Dense(50, activation='relu', name='dense_3')(x)
+    x = Dropout(drop)(x)
+    x = Dense(10, activation='relu', name='dense_4')(x)
+    x = Dropout(drop)(x)
+
+    outputs = []
+    for i in range(num_outputs):
+        outputs.append(
+            Dense(1, activation='linear', name='n_outputs' + str(i))(x))
+
+    model = Model(inputs=[img_in], outputs=outputs, name='linear')
+    return model
 
 def default_memory(input_shape=(120, 160, 3), mem_length=3, mem_depth=0):
     drop = 0.2
