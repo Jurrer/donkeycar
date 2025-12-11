@@ -10,7 +10,7 @@ import numpy as np
 import tensorflow as tf
 
 # Add the donkeycar path
-sys.path.append('/Users/jerzykrczuk/workspace/donkeycar')
+sys.path.append('PUT A PATH TO DONKEYCAR REPO')
 
 from donkeycar.parts.keras import KerasAdvanced
 
