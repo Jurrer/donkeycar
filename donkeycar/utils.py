@@ -487,8 +487,8 @@ def get_model_by_type(model_type: str, cfg: 'Config') -> Union['KerasPilot', 'Fa
     create a Keras model and return it.
     '''
     from donkeycar.parts.keras import KerasCategorical, KerasLinear, \
-        KerasInferred, KerasIMU, KerasMemory, KerasBehavioral, KerasLocalizer, \
-        KerasLSTM, Keras3D_CNN, NvidiaDAVE02, KerasGoogLeNet
+         KerasMemory, KerasBehavioral, \
+        KerasLSTM, NvidiaDAVE02, KerasGoogLeNet
     from donkeycar.parts.interpreter import KerasInterpreter, TfLite, TensorRT, \
         FastAIInterpreter
 

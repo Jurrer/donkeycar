@@ -868,22 +868,24 @@ def inception_module(x, filters_1x1, filters_3x3_reduce, filters_3x3,
     :return: output tensor
     """
     # 1x1 convolution branch
-    conv_1x1 = Conv2D(filters_1x1, (1, 1), padding='same', activation='relu')(x)
+    conv_1x1 = Convolution2D(filters_1x1, (1, 1), padding='same', activation='relu')(x)
     
     # 3x3 convolution branch
-    conv_3x3_reduce = Conv2D(filters_3x3_reduce, (1, 1), padding='same', activation='relu')(x)
-    conv_3x3 = Conv2D(filters_3x3, (3, 3), padding='same', activation='relu')(conv_3x3_reduce)
+    conv_3x3_reduce = Convolution2D(filters_3x3_reduce, (1, 1), padding='same', activation='relu')(x)
+    conv_3x3 = Convolution2D(filters_3x3, (3, 3), padding='same', activation='relu')(conv_3x3_reduce)
     
     # 5x5 convolution branch
-    conv_5x5_reduce = Conv2D(filters_5x5_reduce, (1, 1), padding='same', activation='relu')(x)
-    conv_5x5 = Conv2D(filters_5x5, (5, 5), padding='same', activation='relu')(conv_5x5_reduce)
+    conv_5x5_reduce = Convolution2D(filters_5x5_reduce, (1, 1), padding='same', activation='relu')(x)
+    conv_5x5 = Convolution2D(filters_5x5, (5, 5), padding='same', activation='relu')(conv_5x5_reduce)
     
     # Max pooling branch
     pool_proj = MaxPooling2D((3, 3), strides=(1, 1), padding='same')(x)
-    pool_proj = Conv2D(filters_pool_proj, (1, 1), padding='same', activation='relu')(pool_proj)
+    pool_proj = Convolution2D(filters_pool_proj, (1, 1), padding='same', activation='relu')(pool_proj)
     
     # Concatenate all branches
-    output = concatenate([conv_1x1, conv_3x3, conv_5x5, pool_proj], axis=3, name=name)
+    output = concatenate([conv_1x1, conv_3x3, conv_5x5, pool_proj], axis=3)
+    if name:
+        output = keras.layers.Lambda(lambda x: x, name=name)(output)
     
     return output
 
@@ -901,13 +903,13 @@ def googlenet(num_outputs, input_shape=(120, 160, 3), dropout=0.4):
     img_in = Input(shape=input_shape, name='img_in')
     
     # First convolutional layer
-    x = Conv2D(64, (7, 7), strides=(2, 2), padding='same', activation='relu', name='conv1_7x7')(img_in)
+    x = Convolution2D(64, (7, 7), strides=(2, 2), padding='same', activation='relu', name='conv1_7x7')(img_in)
     x = MaxPooling2D((3, 3), strides=(2, 2), padding='same', name='pool1_3x3')(x)
     x = BatchNormalization()(x)
     
     # Second convolutional layer
-    x = Conv2D(64, (1, 1), padding='same', activation='relu', name='conv2_1x1')(x)
-    x = Conv2D(192, (3, 3), padding='same', activation='relu', name='conv2_3x3')(x)
+    x = Convolution2D(64, (1, 1), padding='same', activation='relu', name='conv2_1x1')(x)
+    x = Convolution2D(192, (3, 3), padding='same', activation='relu', name='conv2_3x3')(x)
     x = BatchNormalization()(x)
     x = MaxPooling2D((3, 3), strides=(2, 2), padding='same', name='pool2_3x3')(x)
     
