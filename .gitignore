@@ -28,3 +28,4 @@ htmlcov/
 lightning_logs
 tb_logs
 models/*
+.continue/*

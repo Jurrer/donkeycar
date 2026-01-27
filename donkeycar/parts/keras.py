@@ -26,8 +26,7 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras.layers import (Dense, Input,Convolution2D,
     MaxPooling2D, Activation, Dropout, Flatten, LSTM, BatchNormalization,
-    Conv3D, MaxPooling3D, Conv2DTranspose, Add, GlobalAveragePooling2D,
-    Reshape, Multiply, Lambda)
+    Conv3D, MaxPooling3D, Conv2DTranspose)
 
 from tensorflow.keras.layers import TimeDistributed as TD
 from tensorflow.keras.backend import concatenate
@@ -264,6 +263,9 @@ class KerasCategorical(KerasPilot):
     default ranges work for the default setup. But cars which go faster may
     want to enable a higher throttle range. And cars with larger steering
     throw may want more bins.
+    
+    Network Type: Convolutional Neural Network (CNN)
+    Layers: 11 layers (5 Conv2D, 2 Dense, 2 Output)
     """
     def __init__(self,
                  interpreter: Interpreter = KerasInterpreter(),
@@ -318,6 +320,9 @@ class KerasLinear(KerasPilot):
     The KerasLinear pilot uses one neuron to output a continuous value via
     the Keras Dense layer with linear activation. One each for steering and
     throttle. The output is not bounded.
+    
+    Network Type: Convolutional Neural Network (CNN)
+    Layers: 9 layers (5 Conv2D, 2 Dense, 2 Output)
     """
     def __init__(self,
                  interpreter: Interpreter = KerasInterpreter(),
@@ -357,6 +362,9 @@ class NvidiaDAVE02(KerasPilot):
     The KerasLinear pilot uses one neuron to output a continuous value via
     the Keras Dense layer with linear activation. One each for steering and
     throttle. The output is not bounded.
+    
+    Network Type: Convolutional Neural Network (CNN) - NVIDIA DAVE-02 architecture
+    Layers: 11 layers (5 Conv2D, 4 Dense, 2 Output)
     """
     def __init__(self,
                  interpreter: Interpreter = KerasInterpreter(),
@@ -392,11 +400,58 @@ class NvidiaDAVE02(KerasPilot):
         return shapes
 
 
+class KerasGoogLeNet(KerasPilot):
+    """
+    A Keras implementation of a GoogLeNet-like network for autonomous driving.
+    Uses Inception modules to capture features at multiple scales.
+    
+    Network Type: Convolutional Neural Network (CNN) - GoogLeNet architecture
+    Layers: Multiple layers with Inception modules
+    """
+    def __init__(self,
+                 interpreter: Interpreter = KerasInterpreter(),
+                 input_shape: Tuple[int, ...] = (120, 160, 3),
+                 num_outputs: int = 2,
+                 dropout: float = 0.4):
+        self.num_outputs = num_outputs
+        self.dropout = dropout
+        super().__init__(interpreter, input_shape)
+
+    def create_model(self):
+        return googlenet(self.num_outputs, self.input_shape, self.dropout)
+
+    def compile(self):
+        self.interpreter.compile(optimizer=self.optimizer, loss='mse')
+
+    def interpreter_to_output(self, interpreter_out):
+        steering = interpreter_out[0]
+        throttle = interpreter_out[1]
+        return steering[0], throttle[0]
+
+    def y_transform(self, record: Union[TubRecord, List[TubRecord]]) \
+            -> Dict[str, Union[float, List[float]]]:
+        assert isinstance(record, TubRecord), 'TubRecord expected'
+        angle: float = record.underlying['user/angle']
+        throttle: float = record.underlying['user/throttle']
+        return {'n_outputs0': angle, 'n_outputs1': throttle}
+
+    def output_shapes(self):
+        # need to cut off None from [None, 120, 160, 3] tensor shape
+        img_shape = self.get_input_shape('img_in')[1:]
+        shapes = ({'img_in': tf.TensorShape(img_shape)},
+                  {'n_outputs0': tf.TensorShape([]),
+                   'n_outputs1': tf.TensorShape([])})
+        return shapes
+
+
 class KerasMemory(KerasLinear):
     """
     The KerasLinearWithMemory is based on KerasLinear but uses the last n
     steering and throttle commands as input in order to produce smoother
     steering outputs
+    
+    Network Type: Convolutional Neural Network (CNN) with Memory Input
+    Layers: 13 layers (5 Conv2D, 4 Dense Memory, 2 Dense, 2 Output)
     """
     def __init__(self,
                  interpreter: Interpreter = KerasInterpreter(),
@@ -485,99 +540,14 @@ class KerasMemory(KerasLinear):
             + f'-L:{self.mem_length}-D:{self.mem_depth}'
 
 
-class KerasInferred(KerasPilot):
-    def __init__(self,
-                 interpreter: Interpreter = KerasInterpreter(),
-                 input_shape: Tuple[int, ...] = (120, 160, 3)):
-        super().__init__(interpreter, input_shape)
-
-    def create_model(self):
-        return default_n_linear(1, self.input_shape)
-
-    def compile(self):
-        self.interpreter.compile(optimizer=self.optimizer, loss='mse')
-
-    def interpreter_to_output(self, interpreter_out):
-        steering = interpreter_out[0]
-        return steering, dk.utils.throttle(steering)
-
-    def y_transform(self, record: Union[TubRecord, List[TubRecord]]) \
-            -> Dict[str, Union[float, List[float]]]:
-        assert isinstance(record, TubRecord), "TubRecord expected"
-        angle: float = record.underlying['user/angle']
-        return {'n_outputs0': angle}
-
-    def output_shapes(self):
-        # need to cut off None from [None, 120, 160, 3] tensor shape
-        img_shape = self.get_input_shape('img_in')[1:]
-        shapes = ({'img_in': tf.TensorShape(img_shape)},
-                  {'n_outputs0': tf.TensorShape([])})
-        return shapes
-
-
-class KerasIMU(KerasPilot):
-    """
-    A Keras part that take an image and IMU vector as input,
-    outputs steering and throttle
-    """
-    # keys for imu data in TubRecord
-    imu_vec = [f'imu/{f}_{x}' for f in ('acl', 'gyr') for x in 'xyz']
-
-    def __init__(self,
-                 interpreter: Interpreter = KerasInterpreter(),
-                 input_shape: Tuple[int, ...] = (120, 160, 3),
-                 num_outputs: int = 2, num_imu_inputs: int = 6):
-        self.num_outputs = num_outputs
-        self.num_imu_inputs = num_imu_inputs
-        super().__init__(interpreter, input_shape)
-
-    def create_model(self):
-        return default_imu(num_outputs=self.num_outputs,
-                           num_imu_inputs=self.num_imu_inputs,
-                           input_shape=self.input_shape)
-
-    def compile(self):
-        self.interpreter.compile(optimizer=self.optimizer, loss='mse')
-
-    def interpreter_to_output(self, interpreter_out) \
-            -> Tuple[Union[float, np.ndarray], ...]:
-        steering = interpreter_out[0]
-        throttle = interpreter_out[1]
-        return steering[0], throttle[0]
-
-    def x_transform(
-            self,
-            record: Union[TubRecord, List[TubRecord]],
-            img_processor: Callable[[np.ndarray], np.ndarray]) \
-            -> Dict[str, Union[float, np.ndarray]]:
-        # this transforms the record into x for training the model to x,y
-        assert isinstance(record, TubRecord), 'TubRecord expected'
-        img_arr = record.image(processor=img_processor)
-        imu_arr = np.array([record.underlying[k] for k in self.imu_vec])
-        return {'img_in': img_arr, 'imu_in': imu_arr}
-
-    def y_transform(self, record: Union[TubRecord, List[TubRecord]]) \
-            -> Dict[str, Union[float, List[float]]]:
-        assert isinstance(record, TubRecord), "TubRecord expected"
-        angle: float = record.underlying['user/angle']
-        throttle: float = record.underlying['user/throttle']
-        return {'out_0': angle, 'out_1': throttle}
-
-    def output_shapes(self):
-        # need to cut off None from [None, 120, 160, 3] tensor shape
-        img_shape = self.get_input_shape('img_in')[1:]
-        # the keys need to match the models input/output layers
-        shapes = ({'img_in': tf.TensorShape(img_shape),
-                   'imu_in': tf.TensorShape([self.num_imu_inputs])},
-                  {'out_0': tf.TensorShape([]),
-                   'out_1': tf.TensorShape([])})
-        return shapes
-
 
 class KerasBehavioral(KerasCategorical):
     """
     A Keras part that take an image and Behavior vector as input,
     outputs steering and throttle
+    
+    Network Type: Convolutional Neural Network (CNN) with Behavioral input
+    Layers: 15 layers (5 Conv2D, 4 Dense Behavior, 2 Dense, 2 Output)
     """
     def __init__(self,
                  interpreter: Interpreter = KerasInterpreter(),
@@ -613,54 +583,13 @@ class KerasBehavioral(KerasCategorical):
         return shapes
 
 
-class KerasLocalizer(KerasPilot):
-    """
-    A Keras part that take an image as input,
-    outputs steering and throttle, and localisation category
-    """
-    def __init__(self,
-                 interpreter: Interpreter = KerasInterpreter(),
-                 input_shape: Tuple[int, ...] = (120, 160, 3),
-                 num_locations: int = 8):
-        self.num_locations = num_locations
-        super().__init__(interpreter, input_shape)
-
-    def create_model(self):
-        return default_loc(num_locations=self.num_locations,
-                           input_shape=self.input_shape)
-
-    def compile(self):
-        self.interpreter.compile(optimizer=self.optimizer, metrics=['acc'],
-                                 loss='mse')
-
-    def interpreter_to_output(self, interpreter_out) \
-            -> Tuple[Union[float, np.ndarray], ...]:
-        angle, throttle, track_loc = interpreter_out
-        loc = np.argmax(track_loc)
-        return angle[0], throttle[0], loc
-
-    def y_transform(self, record: Union[TubRecord, List[TubRecord]]) \
-            -> Dict[str, Union[float, List[float]]]:
-        assert isinstance(record, TubRecord), "TubRecord expected"
-        angle: float = record.underlying['user/angle']
-        throttle: float = record.underlying['user/throttle']
-        loc = record.underlying['localizer/location']
-        loc_one_hot = np.zeros(self.num_locations)
-        loc_one_hot[loc] = 1
-        return {'angle': angle, 'throttle': throttle, 'zloc': loc_one_hot}
-
-    def output_shapes(self):
-        # need to cut off None from [None, 120, 160, 3] tensor shape
-        img_shape = self.get_input_shape('img_in')[1:]
-        # the keys need to match the models input/output layers
-        shapes = ({'img_in': tf.TensorShape(img_shape)},
-                  {'angle': tf.TensorShape([]),
-                   'throttle': tf.TensorShape([]),
-                   'zloc': tf.TensorShape([self.num_locations])})
-        return shapes
-
-
 class KerasLSTM(KerasPilot):
+    """
+    A Keras part that processes sequences of images using LSTM networks.
+    
+    Network Type: Convolutional Neural Network (CNN) with Long Short-Term Memory (LSTM)
+    Layers: 15 layers (5 TimeDistributed Conv2D, 2 TimeDistributed Dense, 2 LSTM, 3 Dense, 1 Output)
+    """
     def __init__(self,
                  interpreter: Interpreter = KerasInterpreter(),
                  input_shape: Tuple[int, ...] = (120, 160, 3),
@@ -737,103 +666,6 @@ class KerasLSTM(KerasPilot):
     def __str__(self) -> str:
         """ For printing model initialisation """
         return f'{super().__str__()}-L:{self.seq_length}'
-
-
-class Keras3D_CNN(KerasPilot):
-    def __init__(self,
-                 interpreter: Interpreter = KerasInterpreter(),
-                 input_shape: Tuple[int, ...] = (120, 160, 3),
-                 seq_length=20,
-                 num_outputs=2):
-        self.num_outputs = num_outputs
-        self.seq_length = seq_length
-        super().__init__(interpreter, input_shape)
-        self.img_seq = deque()
-
-    def seq_size(self) -> int:
-        return self.seq_length
-
-    def create_model(self):
-        return build_3d_cnn(self.input_shape, s=self.seq_length,
-                            num_outputs=self.num_outputs)
-
-    def compile(self):
-        self.interpreter.compile(loss='mse', optimizer=self.optimizer)
-
-    def x_transform(
-            self,
-            records: Union[TubRecord, List[TubRecord]],
-            img_processor: Callable[[np.ndarray], np.ndarray]) \
-            -> Dict[str, Union[float, np.ndarray]]:
-        """ Transforms the record sequence into x for training the model to
-            x, y. """
-        assert isinstance(records, list), 'List[TubRecord] expected'
-        assert len(records) == self.seq_length, \
-            f"Record list of length {self.seq_length} required but " \
-            f"{len(records)} was passed"
-        img_seq = [rec.image(processor=img_processor) for rec in records]
-        return {'img_in': np.array(img_seq)}
-
-    def y_transform(self, records: Union[TubRecord, List[TubRecord]]) \
-            -> Dict[str, Union[float, List[float]]]:
-        """ Only return the last entry of angle/throttle"""
-        assert isinstance(records, list), 'List[TubRecord] expected'
-        angle = records[-1].underlying['user/angle']
-        throttle = records[-1].underlying['user/throttle']
-        return {'outputs': [angle, throttle]}
-
-    def run(self, img_arr, *other_arr):
-        if img_arr.shape[2] == 3 and self.input_shape[2] == 1:
-            img_arr = dk.utils.rgb2gray(img_arr)
-
-        while len(self.img_seq) < self.seq_length:
-            self.img_seq.append(img_arr)
-
-        self.img_seq.popleft()
-        self.img_seq.append(img_arr)
-        new_shape = (self.seq_length, *self.input_shape)
-        img_arr = np.array(self.img_seq).reshape(new_shape)
-        img_arr_norm = normalize_image(img_arr)
-        input_dict = {'img_in': img_arr_norm}
-        return self.inference_from_dict(input_dict)
-
-    def interpreter_to_output(self, interpreter_out) \
-            -> Tuple[Union[float, np.ndarray], ...]:
-        steering = interpreter_out[0]
-        throttle = interpreter_out[1]
-        return steering, throttle
-
-    def output_shapes(self):
-        # need to cut off None from [None, 120, 160, 3] tensor shape
-        img_shape = self.get_input_shape('img_in')[1:]
-        # the keys need to match the models input/output layers
-        shapes = ({'img_in': tf.TensorShape(img_shape)},
-                  {'outputs': tf.TensorShape([self.num_outputs])})
-        return shapes
-
-
-class KerasLatent(KerasPilot):
-    def __init__(self,
-                 interpreter: Interpreter = KerasInterpreter(),
-                 input_shape: Tuple[int, ...] = (120, 160, 3),
-                 num_outputs: int = 2):
-        self.num_outputs = num_outputs
-        super().__init__(interpreter, input_shape)
-
-    def create_model(self):
-        return default_latent(self.num_outputs, self.input_shape)
-
-    def compile(self):
-        loss = {"img_out": "mse", "n_outputs0": "mse", "n_outputs1": "mse"}
-        weights = {"img_out": 100.0, "n_outputs0": 2.0, "n_outputs1": 1.0}
-        self.interpreter.compile(optimizer=self.optimizer,
-                                 loss=loss, loss_weights=weights)
-
-    def interpreter_to_output(self, interpreter_out) \
-            -> Tuple[Union[float, np.ndarray], ...]:
-        steering = interpreter_out[1]
-        throttle = interpreter_out[2]
-        return steering[0][0], throttle[0][0]
 
 
 def conv2d(filters, kernel, strides, layer_num, activation='relu'):
@@ -985,91 +817,6 @@ def default_categorical(input_shape=(120, 160, 3)):
     return model
 
 
-def default_imu(num_outputs, num_imu_inputs, input_shape):
-    drop = 0.2
-    img_in = Input(shape=input_shape, name='img_in')
-    imu_in = Input(shape=(num_imu_inputs,), name="imu_in")
-
-    x = core_cnn_layers(img_in, drop)
-    x = Dense(100, activation='relu')(x)
-    x = Dropout(.1)(x)
-    
-    y = imu_in
-    y = Dense(14, activation='relu')(y)
-    y = Dense(14, activation='relu')(y)
-    y = Dense(14, activation='relu')(y)
-    
-    z = concatenate([x, y])
-    z = Dense(50, activation='relu')(z)
-    z = Dropout(.1)(z)
-    z = Dense(50, activation='relu')(z)
-    z = Dropout(.1)(z)
-
-    outputs = []
-    for i in range(num_outputs):
-        outputs.append(Dense(1, activation='linear', name='out_' + str(i))(z))
-        
-    model = Model(inputs=[img_in, imu_in], outputs=outputs, name='imu')
-    return model
-
-
-def default_bhv(num_bvh_inputs, input_shape):
-    drop = 0.2
-    img_in = Input(shape=input_shape, name='img_in')
-    # tensorflow is ordering the model inputs alphabetically in tensorrt,
-    # so behavior must come after image, hence we put an x here in front.
-    bvh_in = Input(shape=(num_bvh_inputs,), name="xbehavior_in")
-
-    x = core_cnn_layers(img_in, drop)
-    x = Dense(100, activation='relu')(x)
-    x = Dropout(.1)(x)
-    
-    y = bvh_in
-    y = Dense(num_bvh_inputs * 2, activation='relu')(y)
-    y = Dense(num_bvh_inputs * 2, activation='relu')(y)
-    y = Dense(num_bvh_inputs * 2, activation='relu')(y)
-    
-    z = concatenate([x, y])
-    z = Dense(100, activation='relu')(z)
-    z = Dropout(.1)(z)
-    z = Dense(50, activation='relu')(z)
-    z = Dropout(.1)(z)
-    
-    # Categorical output of the angle into 15 bins
-    angle_out = Dense(15, activation='softmax', name='angle_out')(z)
-    # Categorical output of throttle into 20 bins
-    throttle_out = Dense(20, activation='softmax', name='throttle_out')(z)
-
-    model = Model(inputs=[img_in, bvh_in], outputs=[angle_out, throttle_out],
-                  name='behavioral')
-    return model
-
-
-def default_loc(num_locations, input_shape):
-    drop = 0.2
-    img_in = Input(shape=input_shape, name='img_in')
-
-    x = core_cnn_layers(img_in, drop)
-    x = Dense(100, activation='relu')(x)
-    x = Dropout(drop)(x)
-    
-    z = Dense(50, activation='relu')(x)
-    z = Dropout(drop)(z)
-
-    # linear output of the angle
-    angle_out = Dense(1, activation='linear', name='angle')(z)
-    # linear output of throttle
-    throttle_out = Dense(1, activation='linear', name='throttle')(z)
-    # Categorical output of location
-    # Here is a crazy detail b/c TF Lite has a bug and returns the outputs
-    # in the alphabetical order of the name of the layers, so make sure
-    # this output comes last
-    loc_out = Dense(num_locations, activation='softmax', name='zloc')(z)
-
-    model = Model(inputs=[img_in], outputs=[angle_out, throttle_out, loc_out],
-                  name='localizer')
-    return model
-
 
 def rnn_lstm(seq_length=3, num_outputs=2, input_shape=(120, 160, 3)):
     # add sequence length dimensions as keras time-distributed expects shape
@@ -1105,488 +852,92 @@ def rnn_lstm(seq_length=3, num_outputs=2, input_shape=(120, 160, 3)):
     return model
 
 
-def build_3d_cnn(input_shape, s, num_outputs):
+def inception_module(x, filters_1x1, filters_3x3_reduce, filters_3x3, 
+                     filters_5x5_reduce, filters_5x5, filters_pool_proj, name=None):
     """
-    Credit: https://github.com/jessecha/DNRacing/blob/master/3D_CNN_Model/model.py
-
-    :param input_shape:     image input shape
-    :param s:               sequence length
-    :param num_outputs:     output dimension
-    :return:                keras model
-    """
-    drop = 0.5
-    input_shape = (s, ) + input_shape
-    img_in = Input(shape=input_shape, name='img_in')
-    x = img_in
-    # Second layer
-    x = Conv3D(
-            filters=16, kernel_size=(3, 3, 3), strides=(1, 3, 3),
-            data_format='channels_last', padding='same', activation='relu')(x)
-    x = MaxPooling3D(
-            pool_size=(1, 2, 2), strides=(1, 2, 2), padding='valid',
-            data_format=None)(x)
-    # Third layer
-    x = Conv3D(
-            filters=32, kernel_size=(3, 3, 3), strides=(1, 1, 1),
-            data_format='channels_last', padding='same', activation='relu')(x)
-    x = MaxPooling3D(
-        pool_size=(1, 2, 2), strides=(1, 2, 2), padding='valid',
-        data_format=None)(x)
-    # Fourth layer
-    x = Conv3D(
-            filters=64, kernel_size=(3, 3, 3), strides=(1, 1, 1),
-            data_format='channels_last', padding='same', activation='relu')(x)
-    x = MaxPooling3D(
-            pool_size=(1, 2, 2), strides=(1, 2, 2), padding='valid',
-            data_format=None)(x)
-    # Fifth layer
-    x = Conv3D(
-            filters=128, kernel_size=(3, 3, 3), strides=(1, 1, 1),
-            data_format='channels_last', padding='same', activation='relu')(x)
-    x = MaxPooling3D(
-            pool_size=(1, 2, 2), strides=(1, 2, 2), padding='valid',
-            data_format=None)(x)
-    # Fully connected layer
-    x = Flatten()(x)
-
-    x = Dense(256)(x)
-    x = BatchNormalization()(x)
-    x = Activation('relu')(x)
-    x = Dropout(drop)(x)
-
-    x = Dense(256)(x)
-    x = BatchNormalization()(x)
-    x = Activation('relu')(x)
-    x = Dropout(drop)(x)
-
-    out = Dense(num_outputs, name='outputs')(x)
-    model = Model(inputs=[img_in], outputs=out, name='3dcnn')
-    return model
-
-
-def default_latent(num_outputs, input_shape):
-    # TODO: this auto-encoder should run the standard cnn in encoding and
-    #  have corresponding decoder. Also outputs should be reversed with
-    #  images at end.
-    drop = 0.2
-    img_in = Input(shape=input_shape, name='img_in')
-    x = img_in
-    x = Convolution2D(24, 5, strides=2, activation='relu', name="conv2d_1")(x)
-    x = Dropout(drop)(x)
-    x = Convolution2D(32, 5, strides=2, activation='relu', name="conv2d_2")(x)
-    x = Dropout(drop)(x)
-    x = Convolution2D(32, 5, strides=2, activation='relu', name="conv2d_3")(x)
-    x = Dropout(drop)(x)
-    x = Convolution2D(32, 3, strides=1, activation='relu', name="conv2d_4")(x)
-    x = Dropout(drop)(x)
-    x = Convolution2D(32, 3, strides=1, activation='relu', name="conv2d_5")(x)
-    x = Dropout(drop)(x)
-    x = Convolution2D(64, 3, strides=2, activation='relu', name="conv2d_6")(x)
-    x = Dropout(drop)(x)
-    x = Convolution2D(64, 3, strides=2, activation='relu', name="conv2d_7")(x)
-    x = Dropout(drop)(x)
-    x = Convolution2D(64, 1, strides=2, activation='relu', name="latent")(x)
-
-    y = Conv2DTranspose(filters=64, kernel_size=3, strides=2,
-                        name="deconv2d_1")(x)
-    y = Conv2DTranspose(filters=64, kernel_size=3, strides=2,
-                        name="deconv2d_2")(y)
-    y = Conv2DTranspose(filters=32, kernel_size=3, strides=2,
-                        name="deconv2d_3")(y)
-    y = Conv2DTranspose(filters=32, kernel_size=3, strides=2,
-                        name="deconv2d_4")(y)
-    y = Conv2DTranspose(filters=32, kernel_size=3, strides=2,
-                        name="deconv2d_5")(y)
-    y = Conv2DTranspose(filters=1, kernel_size=3, strides=2, name="img_out")(y)
+    GoogLeNet Inception module implementation
     
-    x = Flatten(name='flattened')(x)
-    x = Dense(256, activation='relu')(x)
-    x = Dropout(drop)(x)
-    x = Dense(100, activation='relu')(x)
-    x = Dropout(drop)(x)
-    x = Dense(50, activation='relu')(x)
-    x = Dropout(drop)(x)
+    :param x: input tensor
+    :param filters_1x1: number of 1x1 convolution filters
+    :param filters_3x3_reduce: number of 1x1 convolution filters before 3x3 convolution
+    :param filters_3x3: number of 3x3 convolution filters
+    :param filters_5x5_reduce: number of 1x1 convolution filters before 5x5 convolution
+    :param filters_5x5: number of 5x5 convolution filters
+    :param filters_pool_proj: number of 1x1 convolution filters after max pooling
+    :param name: name for the module
+    :return: output tensor
+    """
+    # 1x1 convolution branch
+    conv_1x1 = Conv2D(filters_1x1, (1, 1), padding='same', activation='relu')(x)
+    
+    # 3x3 convolution branch
+    conv_3x3_reduce = Conv2D(filters_3x3_reduce, (1, 1), padding='same', activation='relu')(x)
+    conv_3x3 = Conv2D(filters_3x3, (3, 3), padding='same', activation='relu')(conv_3x3_reduce)
+    
+    # 5x5 convolution branch
+    conv_5x5_reduce = Conv2D(filters_5x5_reduce, (1, 1), padding='same', activation='relu')(x)
+    conv_5x5 = Conv2D(filters_5x5, (5, 5), padding='same', activation='relu')(conv_5x5_reduce)
+    
+    # Max pooling branch
+    pool_proj = MaxPooling2D((3, 3), strides=(1, 1), padding='same')(x)
+    pool_proj = Conv2D(filters_pool_proj, (1, 1), padding='same', activation='relu')(pool_proj)
+    
+    # Concatenate all branches
+    output = concatenate([conv_1x1, conv_3x3, conv_5x5, pool_proj], axis=3, name=name)
+    
+    return output
 
-    outputs = [y]
+
+def googlenet(num_outputs, input_shape=(120, 160, 3), dropout=0.4):
+    """
+    GoogLeNet-like architecture for autonomous driving
+    
+    :param num_outputs: number of output values (typically 2 for steering and throttle)
+    :param input_shape: input image shape
+    :param dropout: dropout rate
+    :return: Keras model
+    """
+    # Input layer
+    img_in = Input(shape=input_shape, name='img_in')
+    
+    # First convolutional layer
+    x = Conv2D(64, (7, 7), strides=(2, 2), padding='same', activation='relu', name='conv1_7x7')(img_in)
+    x = MaxPooling2D((3, 3), strides=(2, 2), padding='same', name='pool1_3x3')(x)
+    x = BatchNormalization()(x)
+    
+    # Second convolutional layer
+    x = Conv2D(64, (1, 1), padding='same', activation='relu', name='conv2_1x1')(x)
+    x = Conv2D(192, (3, 3), padding='same', activation='relu', name='conv2_3x3')(x)
+    x = BatchNormalization()(x)
+    x = MaxPooling2D((3, 3), strides=(2, 2), padding='same', name='pool2_3x3')(x)
+    
+    # Inception modules
+    # First set of inception modules
+    x = inception_module(x, 64, 96, 128, 16, 32, 32, name='inception_3a')
+    x = inception_module(x, 128, 128, 192, 32, 96, 64, name='inception_3b')
+    x = MaxPooling2D((3, 3), strides=(2, 2), padding='same', name='pool3_3x3')(x)
+    
+    # Second set of inception modules
+    x = inception_module(x, 192, 96, 208, 16, 48, 64, name='inception_4a')
+    x = inception_module(x, 160, 112, 224, 24, 64, 64, name='inception_4b')
+    x = inception_module(x, 128, 128, 256, 24, 64, 64, name='inception_4c')
+    x = inception_module(x, 112, 144, 288, 32, 64, 64, name='inception_4d')
+    x = inception_module(x, 256, 160, 320, 32, 128, 128, name='inception_4e')
+    x = MaxPooling2D((3, 3), strides=(2, 2), padding='same', name='pool4_3x3')(x)
+    
+    # Third set of inception modules
+    x = inception_module(x, 256, 160, 320, 32, 128, 128, name='inception_5a')
+    x = inception_module(x, 384, 192, 384, 48, 128, 128, name='inception_5b')
+    
+    # Global average pooling instead of fully connected layers
+    x = keras.layers.GlobalAveragePooling2D()(x)
+    x = Dropout(dropout)(x)
+    
+    # Output layers for steering and throttle
+    outputs = []
     for i in range(num_outputs):
         outputs.append(Dense(1, activation='linear', name='n_outputs' + str(i))(x))
-        
-    model = Model(inputs=[img_in], outputs=outputs, name='latent')
+    
+    model = Model(inputs=[img_in], outputs=outputs, name='googlenet')
     return model
 
-
-class KerasAdvanced(KerasPilot):
-    """
-    Advanced Keras pilot with ResNet backbone, attention mechanisms,
-    uncertainty quantification, and advanced loss functions.
-    Memory-optimized for GPU efficiency.
-    """
-    def __init__(self,
-                 interpreter: Interpreter = KerasInterpreter(),
-                 input_shape: Tuple[int, ...] = (120, 160, 3),
-                 num_outputs: int = 2,
-                 num_residual_blocks: int = 4,  # Reduced for memory efficiency
-                 base_filters: int = 32,        # Reduced from 64
-                 use_attention: bool = True,
-                 mc_samples: int = 10,
-                 uncertainty_weight: float = 0.1):
-        self.num_outputs = num_outputs
-        self.num_residual_blocks = num_residual_blocks
-        self.base_filters = base_filters
-        self.use_attention = use_attention
-        self.mc_samples = mc_samples
-        self.uncertainty_weight = uncertainty_weight
-        super().__init__(interpreter, input_shape)
-
-    def create_model(self):
-        return advanced_resnet_with_uncertainty(
-            input_shape=self.input_shape,
-            num_outputs=self.num_outputs,
-            num_residual_blocks=self.num_residual_blocks,
-            base_filters=self.base_filters,
-            use_attention=self.use_attention
-        )
-
-    def compile(self):
-        self.interpreter.compile(
-            optimizer=keras.optimizers.Adam(learning_rate=1e-4, clipnorm=1.0),
-            loss={
-                'steering_mean': advanced_huber_loss,
-                'steering_var': 'mse',
-                'throttle_mean': advanced_huber_loss,
-                'throttle_var': 'mse'
-            },
-            loss_weights={
-                'steering_mean': 1.0,
-                'steering_var': self.uncertainty_weight,
-                'throttle_mean': 1.0,
-                'throttle_var': self.uncertainty_weight
-            },
-            metrics=['mae']
-        )
-
-    def interpreter_to_output(self, interpreter_out):
-        steering_mean, steering_var, throttle_mean, throttle_var = interpreter_out
-        return steering_mean[0], throttle_mean[0], steering_var[0], throttle_var[0]
-
-    def run_with_uncertainty(self, img_arr: np.ndarray, *other_arr: List[float]):
-        """Run inference with uncertainty quantification using Monte Carlo dropout."""
-        norm_img_arr = normalize_image(img_arr)
-        np_other_array = tuple(np.array(arr) for arr in other_arr)
-        values = (norm_img_arr, ) + np_other_array
-        input_dict = dict(zip(self.output_shapes()[0].keys(), values))
-
-        # Enable training mode for dropout during inference
-        predictions = []
-        for _ in range(self.mc_samples):
-            pred = self.interpreter.predict_from_dict(input_dict, training=True)
-            predictions.append(pred)
-
-        # Calculate mean and uncertainty across samples
-        predictions = np.array(predictions)
-        mean_steering = np.mean(predictions[:, 0])
-        mean_throttle = np.mean(predictions[:, 2])
-        uncertainty_steering = np.std(predictions[:, 0])
-        uncertainty_throttle = np.std(predictions[:, 2])
-
-        return mean_steering, mean_throttle, uncertainty_steering, uncertainty_throttle
-
-    def y_transform(self, record: Union[TubRecord, List[TubRecord]]) \
-            -> Dict[str, Union[float, List[float]]]:
-        assert isinstance(record, TubRecord), 'TubRecord expected'
-        angle: float = record.underlying['user/angle']
-        throttle: float = record.underlying['user/throttle']
-        # Initialize variance targets (will be learned during training)
-        return {
-            'steering_mean': angle,
-            'steering_var': 0.1,  # Initial uncertainty estimate
-            'throttle_mean': throttle,
-            'throttle_var': 0.1
-        }
-
-    def output_shapes(self):
-        img_shape = self.get_input_shape('img_in')[1:]
-        shapes = (
-            {'img_in': tf.TensorShape(img_shape)},
-            {
-                'steering_mean': tf.TensorShape([]),
-                'steering_var': tf.TensorShape([]),
-                'throttle_mean': tf.TensorShape([]),
-                'throttle_var': tf.TensorShape([])
-            }
-        )
-        return shapes
-
-
-def advanced_huber_loss(y_true, y_pred, delta=1.0):
-    """Advanced Huber loss with adaptive delta."""
-    error = y_true - y_pred
-    is_small_error = tf.abs(error) <= delta
-    squared_loss = tf.square(error) / 2
-    linear_loss = delta * tf.abs(error) - tf.square(delta) / 2
-    return tf.where(is_small_error, squared_loss, linear_loss)
-
-
-def focal_loss(y_true, y_pred, alpha=0.25, gamma=2.0):
-    """Focal loss for handling class imbalance in steering angles."""
-    epsilon = tf.keras.backend.epsilon()
-    y_pred = tf.clip_by_value(y_pred, epsilon, 1. - epsilon)
-    p_t = tf.where(tf.equal(y_true, 1), y_pred, 1 - y_pred)
-    alpha_factor = tf.ones_like(y_true) * alpha
-    alpha_t = tf.where(tf.equal(y_true, 1), alpha_factor, 1 - alpha_factor)
-    cross_entropy = -tf.math.log(p_t)
-    weight = alpha_t * tf.pow((1 - p_t), gamma)
-    focal_loss = weight * cross_entropy
-    return tf.reduce_mean(focal_loss)
-
-
-def uncertainty_loss(y_true, y_pred_var):
-    """Loss function for uncertainty estimation."""
-    return tf.reduce_mean(tf.square(y_pred_var))
-
-
-def residual_block(x, filters, kernel_size=3, stride=1, dropout_rate=0.1):
-    """ResNet-style residual block with dropout for uncertainty."""
-    shortcut = x
-
-    # First conv layer
-    x = Convolution2D(filters, kernel_size, strides=stride, padding='same')(x)
-    x = BatchNormalization()(x)
-    x = Activation('relu')(x)
-    x = Dropout(dropout_rate)(x, training=True)  # Always active for MC dropout
-
-    # Second conv layer
-    x = Convolution2D(filters, kernel_size, strides=1, padding='same')(x)
-    x = BatchNormalization()(x)
-
-    # Adjust shortcut if needed
-    if stride != 1 or shortcut.shape[-1] != filters:
-        shortcut = Convolution2D(filters, 1, strides=stride, padding='same')(shortcut)
-        shortcut = BatchNormalization()(shortcut)
-
-    # Add shortcut
-    x = Add()([x, shortcut])
-    x = Activation('relu')(x)
-    x = Dropout(dropout_rate)(x, training=True)
-
-    return x
-
-
-def channel_attention(x, ratio=8):
-    """Channel attention mechanism (SE-Net style)."""
-    channels = x.shape[-1]
-
-    # Global average pooling
-    gap = GlobalAveragePooling2D()(x)
-
-    # MLP
-    mlp = Dense(channels // ratio, activation='relu')(gap)
-    mlp = Dense(channels, activation='sigmoid')(mlp)
-
-    # Reshape and multiply
-    mlp = Reshape((1, 1, channels))(mlp)
-    return Multiply()([x, mlp])
-
-
-def spatial_attention(x):
-    """Spatial attention mechanism."""
-    # Average and max pooling across channels
-    avg_pool = Lambda(lambda x: tf.reduce_mean(x, axis=-1, keepdims=True))(x)
-    max_pool = Lambda(lambda x: tf.reduce_max(x, axis=-1, keepdims=True))(x)
-
-    # Concatenate and convolve
-    concat = concatenate([avg_pool, max_pool])
-    attention = Convolution2D(1, 7, padding='same', activation='sigmoid')(concat)
-
-    return Multiply()([x, attention])
-
-
-def advanced_resnet_with_uncertainty(input_shape=(120, 160, 3),
-                                   num_outputs=2,
-                                   num_residual_blocks=4,
-                                   base_filters=32,
-                                   use_attention=True):
-    """
-    Memory-optimized ResNet architecture with attention mechanisms and uncertainty quantification.
-    Balanced between performance and GPU memory usage.
-    """
-    img_in = Input(shape=input_shape, name='img_in')
-
-    # Initial convolution - smaller kernel to save memory
-    x = Convolution2D(base_filters, 5, strides=2, padding='same')(img_in)
-    x = BatchNormalization()(x)
-    x = Activation('relu')(x)
-    x = MaxPooling2D(3, strides=2, padding='same')(x)
-
-    # Progressive residual blocks with controlled channel growth
-    filters = base_filters
-    for i in range(num_residual_blocks):
-        stride = 2 if i > 0 and i % 2 == 0 else 1
-        if i > 0 and i % 2 == 0:
-            filters = min(filters * 2, 128)  # Cap at 128 to control memory
-
-        x = residual_block(x, filters, stride=stride, dropout_rate=0.1)
-
-        # Add attention every 2 blocks
-        if use_attention and (i + 1) % 2 == 0:
-            x = channel_attention(x, ratio=16)  # Higher ratio to reduce params
-            x = spatial_attention(x)
-
-    # One additional block for capacity without massive memory increase
-    x = residual_block(x, filters, dropout_rate=0.15)
-    if use_attention:
-        x = channel_attention(x, ratio=16)
-
-    # Global average pooling instead of flatten for better generalization
-    x = GlobalAveragePooling2D()(x)
-
-    # Smaller dense layers to reduce memory usage
-    x = Dense(256, activation='relu')(x)
-    x = Dropout(0.25)(x, training=True)  # MC dropout
-    x = Dense(128, activation='relu')(x)
-    x = Dropout(0.2)(x, training=True)
-    x = Dense(64, activation='relu')(x)
-    x = Dropout(0.15)(x, training=True)
-
-    # Uncertainty quantification outputs
-    # For each output, predict both mean and variance
-    steering_mean = Dense(1, activation='tanh', name='steering_mean')(x)
-    steering_var = Dense(1, activation='softplus', name='steering_var')(x)  # Ensure positive
-
-    throttle_mean = Dense(1, activation='sigmoid', name='throttle_mean')(x)
-    throttle_var = Dense(1, activation='softplus', name='throttle_var')(x)
-
-    model = Model(
-        inputs=[img_in],
-        outputs=[steering_mean, steering_var, throttle_mean, throttle_var],
-        name='advanced_resnet_uncertainty'
-    )
-
-    return model
-
-
-class KerasAdvancedLite(KerasPilot):
-    """
-    Lightweight version of KerasAdvanced for smaller GPUs.
-    Still includes modern techniques but with reduced memory footprint.
-    """
-    def __init__(self,
-                 interpreter: Interpreter = KerasInterpreter(),
-                 input_shape: Tuple[int, ...] = (120, 160, 3),
-                 num_outputs: int = 2,
-                 base_filters: int = 24,
-                 use_attention: bool = True,
-                 mc_samples: int = 5,
-                 uncertainty_weight: float = 0.1):
-        self.num_outputs = num_outputs
-        self.base_filters = base_filters
-        self.use_attention = use_attention
-        self.mc_samples = mc_samples
-        self.uncertainty_weight = uncertainty_weight
-        super().__init__(interpreter, input_shape)
-
-    def create_model(self):
-        return lightweight_resnet_with_uncertainty(
-            input_shape=self.input_shape,
-            base_filters=self.base_filters,
-            use_attention=self.use_attention
-        )
-
-    def compile(self):
-        self.interpreter.compile(
-            optimizer=keras.optimizers.Adam(learning_rate=1e-4, clipnorm=1.0),
-            loss={
-                'steering_mean': advanced_huber_loss,
-                'steering_var': 'mse',
-                'throttle_mean': advanced_huber_loss,
-                'throttle_var': 'mse'
-            },
-            loss_weights={
-                'steering_mean': 1.0,
-                'steering_var': self.uncertainty_weight,
-                'throttle_mean': 1.0,
-                'throttle_var': self.uncertainty_weight
-            },
-            metrics=['mae']
-        )
-
-    def interpreter_to_output(self, interpreter_out):
-        steering_mean, steering_var, throttle_mean, throttle_var = interpreter_out
-        return steering_mean[0], throttle_mean[0], steering_var[0], throttle_var[0]
-
-    def y_transform(self, record: Union[TubRecord, List[TubRecord]]) \
-            -> Dict[str, Union[float, List[float]]]:
-        assert isinstance(record, TubRecord), 'TubRecord expected'
-        angle: float = record.underlying['user/angle']
-        throttle: float = record.underlying['user/throttle']
-        return {
-            'steering_mean': angle,
-            'steering_var': 0.1,
-            'throttle_mean': throttle,
-            'throttle_var': 0.1
-        }
-
-    def output_shapes(self):
-        img_shape = self.get_input_shape('img_in')[1:]
-        shapes = (
-            {'img_in': tf.TensorShape(img_shape)},
-            {
-                'steering_mean': tf.TensorShape([]),
-                'steering_var': tf.TensorShape([]),
-                'throttle_mean': tf.TensorShape([]),
-                'throttle_var': tf.TensorShape([])
-            }
-        )
-        return shapes
-
-
-def lightweight_resnet_with_uncertainty(input_shape=(120, 160, 3),
-                                       base_filters=24,
-                                       use_attention=True):
-    """
-    Lightweight ResNet for GPUs with limited memory (4-6GB).
-    Maintains advanced features while being memory efficient.
-    """
-    img_in = Input(shape=input_shape, name='img_in')
-
-    # Initial convolution with aggressive downsampling
-    x = Convolution2D(base_filters, 5, strides=2, padding='same')(img_in)
-    x = BatchNormalization()(x)
-    x = Activation('relu')(x)
-    x = MaxPooling2D(2, strides=2, padding='same')(x)
-
-    # Lightweight residual blocks
-    x = residual_block(x, base_filters, stride=1, dropout_rate=0.1)
-    if use_attention:
-        x = channel_attention(x, ratio=8)
-
-    x = residual_block(x, base_filters * 2, stride=2, dropout_rate=0.1)
-    if use_attention:
-        x = spatial_attention(x)
-
-    x = residual_block(x, base_filters * 3, stride=2, dropout_rate=0.15)
-    if use_attention:
-        x = channel_attention(x, ratio=8)
-
-    # Global average pooling
-    x = GlobalAveragePooling2D()(x)
-
-    # Compact dense layers
-    x = Dense(128, activation='relu')(x)
-    x = Dropout(0.2)(x, training=True)
-    x = Dense(64, activation='relu')(x)
-    x = Dropout(0.15)(x, training=True)
-
-    # Uncertainty outputs
-    steering_mean = Dense(1, activation='tanh', name='steering_mean')(x)
-    steering_var = Dense(1, activation='softplus', name='steering_var')(x)
-    throttle_mean = Dense(1, activation='sigmoid', name='throttle_mean')(x)
-    throttle_var = Dense(1, activation='softplus', name='throttle_var')(x)
-
-    model = Model(
-        inputs=[img_in],
-        outputs=[steering_mean, steering_var, throttle_mean, throttle_var],
-        name='lightweight_resnet_uncertainty'
-    )
-
-    return model
