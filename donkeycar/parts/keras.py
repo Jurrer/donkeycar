@@ -903,33 +903,33 @@ def googlenet(num_outputs, input_shape=(120, 160, 3), dropout=0.4):
     img_in = Input(shape=input_shape, name='img_in')
     
     # First convolutional layer
-    x = Convolution2D(64, (7, 7), strides=(2, 2), padding='same', activation='relu', name='conv1_7x7')(img_in)
+    x = Convolution2D(32, (7, 7), strides=(2, 2), padding='same', activation='relu', name='conv1_7x7')(img_in)
     x = MaxPooling2D((3, 3), strides=(2, 2), padding='same', name='pool1_3x3')(x)
     x = BatchNormalization()(x)
     
     # Second convolutional layer
-    x = Convolution2D(64, (1, 1), padding='same', activation='relu', name='conv2_1x1')(x)
-    x = Convolution2D(192, (3, 3), padding='same', activation='relu', name='conv2_3x3')(x)
+    x = Convolution2D(32, (1, 1), padding='same', activation='relu', name='conv2_1x1')(x)
+    x = Convolution2D(96, (3, 3), padding='same', activation='relu', name='conv2_3x3')(x)
     x = BatchNormalization()(x)
     x = MaxPooling2D((3, 3), strides=(2, 2), padding='same', name='pool2_3x3')(x)
     
     # Inception modules
     # First set of inception modules
-    x = inception_module(x, 64, 96, 128, 16, 32, 32, name='inception_3a')
-    x = inception_module(x, 128, 128, 192, 32, 96, 64, name='inception_3b')
+    x = inception_module(x, 32, 48, 64, 8, 16, 16, name='inception_3a')
+    x = inception_module(x, 64, 64, 96, 16, 48, 32, name='inception_3b')
     x = MaxPooling2D((3, 3), strides=(2, 2), padding='same', name='pool3_3x3')(x)
     
     # Second set of inception modules
-    x = inception_module(x, 192, 96, 208, 16, 48, 64, name='inception_4a')
-    x = inception_module(x, 160, 112, 224, 24, 64, 64, name='inception_4b')
-    x = inception_module(x, 128, 128, 256, 24, 64, 64, name='inception_4c')
-    x = inception_module(x, 112, 144, 288, 32, 64, 64, name='inception_4d')
-    x = inception_module(x, 256, 160, 320, 32, 128, 128, name='inception_4e')
+    x = inception_module(x, 96, 48, 104, 8, 24, 32, name='inception_4a')
+    x = inception_module(x, 80, 56, 112, 12, 32, 32, name='inception_4b')
+    x = inception_module(x, 64, 64, 128, 12, 32, 32, name='inception_4c')
+    x = inception_module(x, 56, 72, 144, 16, 32, 32, name='inception_4d')
+    x = inception_module(x, 128, 80, 160, 16, 64, 64, name='inception_4e')
     x = MaxPooling2D((3, 3), strides=(2, 2), padding='same', name='pool4_3x3')(x)
     
     # Third set of inception modules
-    x = inception_module(x, 256, 160, 320, 32, 128, 128, name='inception_5a')
-    x = inception_module(x, 384, 192, 384, 48, 128, 128, name='inception_5b')
+    x = inception_module(x, 128, 80, 160, 16, 64, 64, name='inception_5a')
+    x = inception_module(x, 192, 96, 192, 24, 64, 64, name='inception_5b')
     
     # Global average pooling instead of fully connected layers
     x = keras.layers.GlobalAveragePooling2D()(x)
