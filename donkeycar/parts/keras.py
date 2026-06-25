@@ -26,7 +26,8 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras.layers import (Dense, Input,Convolution2D,
     MaxPooling2D, Activation, Dropout, Flatten, LSTM, BatchNormalization,
-    Conv3D, MaxPooling3D, Conv2DTranspose)
+    Conv3D, MaxPooling3D, Conv2DTranspose, SeparableConv2D,
+    GlobalAveragePooling2D, Rescaling, Conv2D)
 
 from tensorflow.keras.layers import TimeDistributed as TD
 from tensorflow.keras.backend import concatenate
@@ -441,6 +442,110 @@ class KerasGoogLeNet(KerasPilot):
         shapes = ({'img_in': tf.TensorShape(img_shape)},
                   {'n_outputs0': tf.TensorShape([]),
                    'n_outputs1': tf.TensorShape([])})
+        return shapes
+
+
+def res_sep_block(inputs, filters, stride=1, activation='swish'):
+    """Helper function for residual separable block."""
+    shortcut = inputs
+
+    if stride != 1 or inputs.shape[-1] != filters:
+        shortcut = Conv2D(filters, 1, strides=stride, padding='same')(inputs)
+        shortcut = BatchNormalization()(shortcut)
+
+    x = SeparableConv2D(filters, 3, strides=stride, padding='same')(inputs)
+    x = BatchNormalization()(x)
+    x = Activation(activation)(x)
+
+    x = SeparableConv2D(filters, 3, padding='same')(x)
+    x = BatchNormalization()(x)
+
+    x = keras.layers.Add()([shortcut, x])
+    x = Activation(activation)(x)
+    return x
+
+
+def create_resnet_model(input_shape=(120, 160, 3)):
+    """Create a Lightweight Residual Network with Depthwise Separable Convolutions."""
+    policy = tf.keras.mixed_precision.Policy('mixed_float16')
+    tf.keras.mixed_precision.set_global_policy(policy)
+
+    img_in = Input(shape=input_shape, name='img_in')
+
+    x = Rescaling(1./127.5, offset=-1)(img_in)
+
+    height, width, _ = input_shape
+    if height >= 240:
+        filters = [16, 32, 32, 64, 64]
+    else:
+        filters = [32, 64, 64, 128, 128]
+
+    x = Conv2D(filters[0], 3, strides=2, padding='same')(x)
+    x = BatchNormalization()(x)
+    x = Activation('swish')(x)
+
+    x = res_sep_block(x, filters[0], stride=1)
+    x = res_sep_block(x, filters[1], stride=2)
+    x = res_sep_block(x, filters[1], stride=1)
+    x = res_sep_block(x, filters[2], stride=2)
+    x = res_sep_block(x, filters[2], stride=1)
+
+    x = GlobalAveragePooling2D()(x)
+
+    angle = Dense(32, activation='swish')(x)
+    angle = Dense(1, name='angle_out', activation='linear')(angle)
+
+    throttle = Dense(32, activation='swish')(x)
+    throttle = Dense(1, name='throttle_out', activation='linear')(throttle)
+
+    model = Model(inputs=[img_in], outputs=[angle, throttle])
+    return model
+
+
+class KerasResNet(KerasPilot):
+    """
+    A Lightweight Residual Network with Depthwise Separable Convolutions
+    optimized for real-time inference on Raspberry Pi 4 while maintaining
+    good feature extraction capability.
+    
+    Network Type: Convolutional Neural Network (CNN) - ResNet-like architecture
+    with Depthwise Separable Convolutions
+    """
+    def __init__(self,
+                 interpreter: Interpreter = KerasInterpreter(),
+                 input_shape: Tuple[int, ...] = (120, 160, 3),
+                 num_outputs: int = 2):
+        self.num_outputs = num_outputs
+        super().__init__(interpreter, input_shape)
+
+    def create_model(self):
+        return create_resnet_model(self.input_shape)
+
+    def compile(self):
+        policy = tf.keras.mixed_precision.Policy('mixed_float16')
+        tf.keras.mixed_precision.set_global_policy(policy)
+        self.interpreter.compile(
+            optimizer=self.optimizer,
+            loss='mse',
+            loss_weights={'angle_out': 0.8, 'throttle_out': 0.2})
+
+    def interpreter_to_output(self, interpreter_out):
+        steering = interpreter_out[0]
+        throttle = interpreter_out[1]
+        return steering[0], throttle[0]
+
+    def y_transform(self, record: Union[TubRecord, List[TubRecord]]) \
+            -> Dict[str, Union[float, List[float]]]:
+        assert isinstance(record, TubRecord), 'TubRecord expected'
+        angle: float = record.underlying['user/angle']
+        throttle: float = record.underlying['user/throttle']
+        return {'angle_out': angle, 'throttle_out': throttle}
+
+    def output_shapes(self):
+        img_shape = self.get_input_shape('img_in')[1:]
+        shapes = ({'img_in': tf.TensorShape(img_shape)},
+                  {'angle_out': tf.TensorShape([]),
+                   'throttle_out': tf.TensorShape([])})
         return shapes
 
 

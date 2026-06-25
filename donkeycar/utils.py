@@ -488,7 +488,7 @@ def get_model_by_type(model_type: str, cfg: 'Config') -> Union['KerasPilot', 'Fa
     '''
     from donkeycar.parts.keras import KerasCategorical, KerasLinear, \
          KerasMemory, KerasBehavioral, \
-        KerasLSTM, NvidiaDAVE02, KerasGoogLeNet
+        KerasLSTM, NvidiaDAVE02, KerasGoogLeNet, KerasResNet
     from donkeycar.parts.interpreter import KerasInterpreter, TfLite, TensorRT, \
         FastAIInterpreter
 
@@ -548,6 +548,8 @@ def get_model_by_type(model_type: str, cfg: 'Config') -> Union['KerasPilot', 'Fa
         kl = NvidiaDAVE02(interpreter=interpreter, input_shape=input_shape)
     elif used_model_type == "googlenet":
         kl = KerasGoogLeNet(interpreter=interpreter, input_shape=input_shape)
+    elif used_model_type == "resnet":
+        kl = KerasResNet(interpreter=interpreter, input_shape=input_shape)
     else:
         known = [k + u for k in ('', 'tflite_', 'tensorrt_')
                  for u in used_model_type.mem]
