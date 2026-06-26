@@ -467,9 +467,6 @@ def res_sep_block(inputs, filters, stride=1, activation='swish'):
 
 def create_resnet_model(input_shape=(120, 160, 3)):
     """Create a Lightweight Residual Network with Depthwise Separable Convolutions."""
-    policy = tf.keras.mixed_precision.Policy('mixed_float16')
-    tf.keras.mixed_precision.set_global_policy(policy)
-
     img_in = Input(shape=input_shape, name='img_in')
 
     x = Rescaling(1./127.5, offset=-1)(img_in)
@@ -522,8 +519,6 @@ class KerasResNet(KerasPilot):
         return create_resnet_model(self.input_shape)
 
     def compile(self):
-        policy = tf.keras.mixed_precision.Policy('mixed_float16')
-        tf.keras.mixed_precision.set_global_policy(policy)
         self.interpreter.compile(
             optimizer=self.optimizer,
             loss='mse',
