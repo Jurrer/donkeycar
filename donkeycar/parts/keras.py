@@ -445,84 +445,52 @@ class KerasGoogLeNet(KerasPilot):
         return shapes
 
 
-def res_sep_block(inputs, filters, stride=1, activation='swish'):
-    """Helper function for residual separable block."""
-    shortcut = inputs
-
-    if stride != 1 or inputs.shape[-1] != filters:
-        shortcut = Conv2D(filters, 1, strides=stride, padding='same')(inputs)
-        shortcut = BatchNormalization()(shortcut)
-
-    x = SeparableConv2D(filters, 3, strides=stride, padding='same')(inputs)
-    x = BatchNormalization()(x)
-    x = Activation(activation)(x)
-
-    x = SeparableConv2D(filters, 3, padding='same')(x)
-    x = BatchNormalization()(x)
-
-    x = keras.layers.Add()([shortcut, x])
-    x = Activation(activation)(x)
-    return x
-
-
-def create_resnet_model(input_shape=(120, 160, 3)):
-    """Create a Lightweight Residual Network with Depthwise Separable Convolutions."""
+def create_simple_cnn_model(input_shape=(120, 160, 3)):
+    """Create a standard PilotNet-style 5-layer CNN."""
     img_in = Input(shape=input_shape, name='img_in')
 
-    x = Rescaling(1./127.5, offset=-1)(img_in)
+    x = Conv2D(24, (5, 5), strides=(2, 2), activation='relu', name='conv2d_1')(img_in)
+    x = Conv2D(32, (5, 5), strides=(2, 2), activation='relu', name='conv2d_2')(x)
+    x = Conv2D(64, (5, 5), strides=(2, 2), activation='relu', name='conv2d_3')(x)
+    x = Conv2D(64, (3, 3), strides=(1, 1), activation='relu', name='conv2d_4')(x)
+    x = Conv2D(64, (3, 3), strides=(1, 1), activation='relu', name='conv2d_5')(x)
 
-    height, width, _ = input_shape
-    if height >= 240:
-        filters = [16, 32, 32, 64, 64]
-    else:
-        filters = [32, 64, 64, 128, 128]
+    x = Flatten(name='flattened')(x)
+    x = Dropout(0.2)(x)
 
-    x = Conv2D(filters[0], 3, strides=2, padding='same')(x)
-    x = BatchNormalization()(x)
-    x = Activation('swish')(x)
+    x = Dense(100, activation='relu', name='dense_1')(x)
+    x = Dropout(0.1)(x)
+    x = Dense(50, activation='relu', name='dense_2')(x)
 
-    x = res_sep_block(x, filters[0], stride=1)
-    x = res_sep_block(x, filters[1], stride=2)
-    x = res_sep_block(x, filters[1], stride=1)
-    x = res_sep_block(x, filters[2], stride=2)
-    x = res_sep_block(x, filters[2], stride=1)
-
-    x = GlobalAveragePooling2D()(x)
-
-    angle = Dense(32, activation='swish')(x)
-    angle = Dense(1, name='angle_out', activation='linear')(angle)
-
-    throttle = Dense(32, activation='swish')(x)
-    throttle = Dense(1, name='throttle_out', activation='linear')(throttle)
+    angle = Dense(1, name='angle_out', activation='linear')(x)
+    throttle = Dense(1, name='throttle_out', activation='linear')(x)
 
     model = Model(inputs=[img_in], outputs=[angle, throttle])
     return model
 
 
-class KerasResNet(KerasPilot):
+class SimpleCNNPilot(KerasPilot):
     """
-    A Lightweight Residual Network with Depthwise Separable Convolutions
-    optimized for real-time inference on Raspberry Pi 4 while maintaining
+    A standard PilotNet-style 5-layer CNN for lane keeping and throttle control.
+    Optimized for real-time inference on Raspberry Pi 4 while maintaining
     good feature extraction capability.
     
-    Network Type: Convolutional Neural Network (CNN) - ResNet-like architecture
-    with Depthwise Separable Convolutions
+    Network Type: Convolutional Neural Network (CNN) - PilotNet architecture
+    Layers: 12 layers (5 Conv2D, 3 Dense, 2 Dropout, 2 Output)
     """
     def __init__(self,
                  interpreter: Interpreter = KerasInterpreter(),
-                 input_shape: Tuple[int, ...] = (120, 160, 3),
-                 num_outputs: int = 2):
-        self.num_outputs = num_outputs
+                 input_shape: Tuple[int, ...] = (120, 160, 3)):
         super().__init__(interpreter, input_shape)
 
     def create_model(self):
-        return create_resnet_model(self.input_shape)
+        return create_simple_cnn_model(self.input_shape)
 
     def compile(self):
         self.interpreter.compile(
             optimizer=self.optimizer,
-            loss='mse',
-            loss_weights={'angle_out': 0.8, 'throttle_out': 0.2})
+            loss={'angle_out': 'mse', 'throttle_out': 'mse'},
+            loss_weights={'angle_out': 0.5, 'throttle_out': 0.5})
 
     def interpreter_to_output(self, interpreter_out):
         steering = interpreter_out[0]
